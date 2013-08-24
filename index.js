@@ -1,0 +1,155 @@
+var path    = require("path");
+var fs      = require("fs");
+var mkdirp  = require("mkdirp");
+var crypto  = require("crypto");
+var _       = require("lodash");
+var async   = require("async");
+var gm      = require("gm");
+var mmmagic = require("mmmagic")
+var Mmmagic = mmmagic.Magic;
+var ACCEPTED_MEDIA_TYPE_REGEXP = /^image\/(png|jpeg)$/;
+var Picture = require("./picture");
+
+var sourcePath = process.argv[2];
+var targetPath = process.argv[3];
+if (!sourcePath) throw new Error("Please specify a source path");
+if (!targetPath) throw new Error("Please specify a target path");
+
+var total = 0, done = 0, errors = 0, skipped = 0;
+
+var queue = async.queue(function (picture, callback) {
+  processPicture(picture, function (err) {
+    if (err) errors++;
+    done++;
+    callback(err);
+  });
+}, 8);
+
+function run(callback) {
+  console.log("Looking for pictures in", sourcePath, "...");
+
+  Picture.init(function () {
+    discoverPicturesUnderPath(sourcePath, function (picture, callback) {
+      queue.push(picture);
+      total++;
+      callback();
+    }, function (err, pictures) {
+      if (err) return callback(err);
+      log("All pictures discovered.");
+      // set the queue drain when all files are discovered
+      // queue.drain = ...
+      queue.drain = callback;
+    });
+  });
+}
+
+function discoverPicturesUnderPath(sourcePath, onPicture, callback) {
+  fs.readdir(sourcePath, function(err, nodes) {
+    if (err) return callback(err);
+
+    var subDirectories = [];
+    var files = [];
+
+    var nodes = _.map(nodes, function (node) {
+      return path.join(sourcePath, node);
+    });
+
+    async.eachSeries(nodes, function (node, callback) {
+      fs.stat(node, function (err, stat) {
+        if (err) return callback(err);
+
+        if (stat.isDirectory())
+          discoverPicturesUnderPath(node, onPicture, callback);
+        else if (stat.isFile()) {
+          files.push(node);
+          callback();
+        }
+      });
+    }, function (err) {
+      if (err) return callback(err);
+
+      async.eachSeries(files, function (file, callback) {
+        mmm = new Mmmagic(mmmagic.MAGIC_MIME_TYPE);
+        mmm.detectFile(file, function (err, mediaType) {
+          if (err) return callback(new Error("ERR: " + err.message));
+          if (ACCEPTED_MEDIA_TYPE_REGEXP.test(mediaType))
+            onPicture(file, callback);
+          else
+            callback();
+        });
+      }, function (err) {
+        if (err) return callback(err);
+        callback(null);
+      });
+    });
+  });
+}
+
+function processPicture(picturePath, callback) {
+  var md5 = crypto.createHash('md5');
+
+  //var s = fs.ReadStream(picturePath);
+  //s.on('data', function(d) {
+  //  md5.update(d);
+  //  data.write(d.toString());
+  //});
+
+  //s.on('end', function() {
+  fs.readFile(picturePath, function (err, content) {
+    md5.update(content);
+    var hash = md5.digest('hex');
+    Picture.findOne({ hash: hash }, function (err, existingPicture) {
+      if (err) return callback(err);
+      if (existingPicture) {
+        skipped++;
+        log(picturePath, "is already imported");
+        callback();
+      } else {
+        gm(content).identify(function (err, data) {
+          var shotTime, exif = data["Profile-EXIF"];
+          if (exif && (shotTime = exif["Date Time Original"] || exif["Date Time"])) {
+            var shotTime = shotTime.split(/[^\d]+/);
+            var targetPictureBasename = path.join(targetPath, shotTime[0], shotTime[1]);
+            var targetPictureFilename = shotTime[2] + "_" + shotTime[3] + shotTime[4] + shotTime[5] + ".jpg";
+            var targetPicturePath = path.join(targetPictureBasename, targetPictureFilename);
+
+            mkdirp(targetPictureBasename, function (err) {
+              if (err) return callback(err);
+
+              fs.writeFile(targetPicturePath, content, function (err) {
+                if (err) return callback(err);
+
+                var picture = new Picture({
+                  hash: hash,
+                  originalPath: picturePath,
+                  path: targetPicturePath,
+                  shotTime: shotTime
+                });
+                picture.save(function (err) {
+                  if (err) return callback(err);
+                  log(picturePath, 'saved as', targetPicturePath);
+                  callback();
+                });
+              });
+            });
+          } else {
+            console.log(picturePath, "has no EXIF date");
+            callback()
+          }
+        });
+      }
+    });
+  });
+}
+
+run(function (err) {
+  if (err) return console.log("ERROR", err);
+  console.log("DONE");
+  process.exit(0);
+});
+
+function log(msg) {
+  var params = Array.prototype.slice.call(arguments);
+  params.unshift("[" + done + "/" + total + " Q:" + queue.length() + " S:" + skipped + " E:" + errors + "]");
+  console.log.apply(console, params);
+}
