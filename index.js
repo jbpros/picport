@@ -1,3 +1,4 @@
+var nopt    = require("nopt");
 var path    = require("path");
 var fs      = require("fs");
 var mkdirp  = require("mkdirp");
@@ -10,12 +11,21 @@ var Mmmagic = mmmagic.Magic;
 var ACCEPTED_MEDIA_TYPE_REGEXP = /^image\/(png|jpeg)$/;
 var Picture = require("./picture");
 
-var sourcePath = process.argv[2];
-var targetPath = process.argv[3];
-if (!sourcePath) throw new Error("Please specify a source path");
+var knownOpts = {
+  "out": [String]
+};
+
+var shortHands = {
+  "o": ["--out"]
+};
+
+var options = nopt(knownOpts, shortHands, process.argv, 2);
+var sourcePaths = options.argv.remain;
+var targetPath = options.out;
+if (sourcePaths.length == 0) throw new Error("Please specify some source paths");
 if (!targetPath) throw new Error("Please specify a target path");
 
-var total = 0, done = 0, errors = 0, skipped = 0;
+var total = 0, done = 0, errors = 0, skipped = 0, discovered = false;
 
 var queue = async.queue(function (picture, callback) {
   processPicture(picture, function (err) {
@@ -26,18 +36,23 @@ var queue = async.queue(function (picture, callback) {
 }, 8);
 
 function run(callback) {
-  console.log("Looking for pictures in", sourcePath, "...");
+  console.log("Looking for pictures in", sourcePaths, "...");
 
   Picture.init(function () {
-    discoverPicturesUnderPath(sourcePath, function (picture, callback) {
-      queue.push(picture);
-      total++;
-      callback();
-    }, function (err, pictures) {
+    async.eachSeries(sourcePaths, function (sourcePath, callback) {
+      discoverPicturesUnderPath(sourcePath, function (picture, callback) {
+        queue.push(picture);
+        total++;
+        callback();
+      }, function (err, pictures) {
+        if (err) return callback(err);
+        callback();
+      });
+    }, function (err) {
       if (err) return callback(err);
+      discovered = true;
       log("All pictures discovered.");
-      // set the queue drain when all files are discovered
-      // queue.drain = ...
+      // set the queue drain when all files are
       queue.drain = callback;
     });
   });
@@ -133,7 +148,7 @@ function processPicture(picturePath, callback) {
               });
             });
           } else {
-            console.log(picturePath, "has no EXIF date");
+            log(picturePath, "has no EXIF date");
             callback()
           }
         });
@@ -144,12 +159,12 @@ function processPicture(picturePath, callback) {
 
 run(function (err) {
   if (err) return console.log("ERROR", err);
-  console.log("DONE");
+  log("DONE");
   process.exit(0);
 });
 
 function log(msg) {
   var params = Array.prototype.slice.call(arguments);
-  params.unshift("[" + done + "/" + total + " Q:" + queue.length() + " S:" + skipped + " E:" + errors + "]");
+  params.unshift("[" + done + "/" + (discovered ? "" : "~") + total + " Q:" + queue.length() + " S:" + skipped + " E:" + errors + "]");
   console.log.apply(console, params);
 }
