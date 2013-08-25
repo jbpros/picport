@@ -31,7 +31,7 @@ var queue = async.queue(function (picture, callback) {
   processPicture(picture, function (err) {
     if (err) {
       errors++;
-      log("ERROR", err.message || err);
+      log("ERROR", picture, ":", err.message || err);
     }
     done++;
     callback(err);
