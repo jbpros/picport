@@ -29,7 +29,10 @@ var total = 0, done = 0, errors = 0, skipped = 0, discovered = false;
 
 var queue = async.queue(function (picture, callback) {
   processPicture(picture, function (err) {
-    if (err) errors++;
+    if (err) {
+      errors++;
+      log("ERROR", err.message || err);
+    }
     done++;
     callback(err);
   });
